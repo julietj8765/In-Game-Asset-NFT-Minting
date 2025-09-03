@@ -9,10 +9,16 @@
 (define-constant err-insufficient-score (err u105))
 (define-constant err-asset-not-found (err u106))
 (define-constant err-player-not-registered (err u107))
+(define-constant err-asset-not-listed (err u108))
+(define-constant err-cannot-buy-own-asset (err u109))
+(define-constant err-insufficient-payment (err u110))
+(define-constant err-asset-already-listed (err u111))
+(define-constant err-not-listed-owner (err u112))
 
 (define-data-var last-token-id uint u0)
 (define-data-var game-active bool true)
 (define-data-var min-score-threshold uint u100)
+(define-data-var marketplace-fee-percent uint u250)
 
 (define-map asset-metadata
   uint
@@ -48,6 +54,15 @@
     asset-type: (string-ascii 32),
     rarity: (string-ascii 16),
     active: bool
+  }
+)
+
+(define-map marketplace-listings
+  uint
+  {
+    seller: principal,
+    price: uint,
+    listed-at: uint
   }
 )
 
@@ -230,11 +245,77 @@
   (ok (var-get last-token-id))
 )
 
+(define-public (list-asset-for-sale (token-id uint) (price uint))
+  (let ((asset-owner (unwrap! (nft-get-owner? game-asset token-id) err-asset-not-found)))
+    (asserts! (is-eq tx-sender asset-owner) err-not-token-owner)
+    (asserts! (is-none (map-get? marketplace-listings token-id)) err-asset-already-listed)
+    (asserts! (> price u0) err-insufficient-payment)
+    (map-set marketplace-listings token-id
+      {
+        seller: tx-sender,
+        price: price,
+        listed-at: stacks-block-height
+      })
+    (ok token-id)
+  )
+)
+
+(define-public (remove-asset-listing (token-id uint))
+  (let ((listing (unwrap! (map-get? marketplace-listings token-id) err-asset-not-listed)))
+    (asserts! (is-eq tx-sender (get seller listing)) err-not-listed-owner)
+    (map-delete marketplace-listings token-id)
+    (ok token-id)
+  )
+)
+
+(define-public (buy-listed-asset (token-id uint))
+  (let (
+    (listing (unwrap! (map-get? marketplace-listings token-id) err-asset-not-listed))
+    (asset-owner (unwrap! (nft-get-owner? game-asset token-id) err-asset-not-found))
+    (sale-price (get price listing))
+    (marketplace-fee (/ (* sale-price (var-get marketplace-fee-percent)) u10000))
+    (seller-payment (- sale-price marketplace-fee))
+  )
+    (asserts! (is-eq asset-owner (get seller listing)) err-not-listed-owner)
+    (asserts! (not (is-eq tx-sender asset-owner)) err-cannot-buy-own-asset)
+    (try! (stx-transfer? seller-payment tx-sender asset-owner))
+    (try! (nft-transfer? game-asset token-id asset-owner tx-sender))
+    (map-delete marketplace-listings token-id)
+    (begin
+      (if (> marketplace-fee u0)
+        (try! (stx-transfer? marketplace-fee tx-sender contract-owner))
+        true
+      )
+      (ok token-id)
+    )
+  )
+)
+
+(define-public (update-asset-price (token-id uint) (new-price uint))
+  (let ((listing (unwrap! (map-get? marketplace-listings token-id) err-asset-not-listed)))
+    (asserts! (is-eq tx-sender (get seller listing)) err-not-listed-owner)
+    (asserts! (> new-price u0) err-insufficient-payment)
+    (map-set marketplace-listings token-id
+      (merge listing {price: new-price}))
+    (ok token-id)
+  )
+)
+
+(define-public (set-marketplace-fee (new-fee-percent uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (<= new-fee-percent u1000) err-insufficient-payment)
+    (var-set marketplace-fee-percent new-fee-percent)
+    (ok new-fee-percent)
+  )
+)
+
 (define-read-only (get-game-status)
   {
     active: (var-get game-active),
     total-assets-minted: (var-get last-token-id),
-    min-score-threshold: (var-get min-score-threshold)
+    min-score-threshold: (var-get min-score-threshold),
+    marketplace-fee-percent: (var-get marketplace-fee-percent)
   }
 )
 
@@ -253,4 +334,15 @@
       }
     )
   )
+)
+
+(define-read-only (get-marketplace-listing (token-id uint))
+  (map-get? marketplace-listings token-id)
+)
+
+(define-read-only (get-marketplace-fee-info)
+  {
+    fee-percent: (var-get marketplace-fee-percent),
+    fee-recipient: contract-owner
+  }
 )
