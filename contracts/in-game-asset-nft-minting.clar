@@ -14,6 +14,11 @@
 (define-constant err-insufficient-payment (err u110))
 (define-constant err-asset-already-listed (err u111))
 (define-constant err-not-listed-owner (err u112))
+(define-constant err-invalid-fusion-recipe (err u113))
+(define-constant err-recipe-already-exists (err u114))
+(define-constant err-recipe-not-active (err u115))
+(define-constant err-asset-already-used (err u116))
+(define-constant err-duplicate-input-assets (err u117))
 
 (define-data-var last-token-id uint u0)
 (define-data-var game-active bool true)
@@ -64,6 +69,23 @@
     price: uint,
     listed-at: uint
   }
+)
+
+(define-map fusion-recipes
+  (string-ascii 64)
+  {
+    input-type-1: (string-ascii 32),
+    input-type-2: (string-ascii 32),
+    output-name: (string-ascii 64),
+    output-type: (string-ascii 32),
+    output-rarity: (string-ascii 16),
+    active: bool
+  }
+)
+
+(define-map asset-fusion-history
+  uint
+  bool
 )
 
 (define-private (get-next-token-id)
@@ -345,4 +367,138 @@
     fee-percent: (var-get marketplace-fee-percent),
     fee-recipient: contract-owner
   }
+)
+
+(define-public (create-fusion-recipe 
+  (recipe-name (string-ascii 64))
+  (input-type-1 (string-ascii 32))
+  (input-type-2 (string-ascii 32))
+  (output-name (string-ascii 64))
+  (output-type (string-ascii 32))
+  (output-rarity (string-ascii 16)))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-none (map-get? fusion-recipes recipe-name)) err-recipe-already-exists)
+    (map-set fusion-recipes recipe-name
+      {
+        input-type-1: input-type-1,
+        input-type-2: input-type-2,
+        output-name: output-name,
+        output-type: output-type,
+        output-rarity: output-rarity,
+        active: true
+      })
+    (ok recipe-name)
+  )
+)
+
+(define-public (toggle-recipe-status (recipe-name (string-ascii 64)))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (let ((recipe (unwrap! (map-get? fusion-recipes recipe-name) err-invalid-fusion-recipe)))
+      (map-set fusion-recipes recipe-name
+        (merge recipe {active: (not (get active recipe))}))
+      (ok (not (get active recipe)))
+    )
+  )
+)
+
+(define-public (fuse-assets (token-id-1 uint) (token-id-2 uint) (recipe-name (string-ascii 64)))
+  (let (
+    (owner-1 (unwrap! (nft-get-owner? game-asset token-id-1) err-asset-not-found))
+    (owner-2 (unwrap! (nft-get-owner? game-asset token-id-2) err-asset-not-found))
+    (metadata-1 (unwrap! (map-get? asset-metadata token-id-1) err-asset-not-found))
+    (metadata-2 (unwrap! (map-get? asset-metadata token-id-2) err-asset-not-found))
+    (recipe (unwrap! (map-get? fusion-recipes recipe-name) err-invalid-fusion-recipe))
+    (new-token-id (get-next-token-id))
+  )
+    (asserts! (is-eq tx-sender owner-1) err-not-token-owner)
+    (asserts! (is-eq tx-sender owner-2) err-not-token-owner)
+    (asserts! (not (is-eq token-id-1 token-id-2)) err-duplicate-input-assets)
+    (asserts! (is-none (map-get? asset-fusion-history token-id-1)) err-asset-already-used)
+    (asserts! (is-none (map-get? asset-fusion-history token-id-2)) err-asset-already-used)
+    (asserts! (get active recipe) err-recipe-not-active)
+    
+    (asserts! 
+      (or
+        (and 
+          (is-eq (get asset-type metadata-1) (get input-type-1 recipe))
+          (is-eq (get asset-type metadata-2) (get input-type-2 recipe)))
+        (and 
+          (is-eq (get asset-type metadata-1) (get input-type-2 recipe))
+          (is-eq (get asset-type metadata-2) (get input-type-1 recipe))))
+      err-invalid-fusion-recipe)
+    
+    (try! (nft-burn? game-asset token-id-1 tx-sender))
+    (try! (nft-burn? game-asset token-id-2 tx-sender))
+    (map-set asset-fusion-history token-id-1 true)
+    (map-set asset-fusion-history token-id-2 true)
+    
+    (try! (nft-mint? game-asset new-token-id tx-sender))
+    (map-set asset-metadata new-token-id
+      {
+        name: (get output-name recipe),
+        asset-type: (get output-type recipe),
+        rarity: (get output-rarity recipe),
+        event-triggered: "fusion",
+        mint-block: stacks-block-height
+      })
+    (ok new-token-id)
+  )
+)
+
+(define-public (initialize-fusion-recipes)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (try! (create-fusion-recipe "sword-shield" "weapon" "armor" "Warrior's Aegis" "hybrid" "epic"))
+    (try! (create-fusion-recipe "gem-tool" "gem" "tool" "Enchanted Finder" "magical-tool" "rare"))
+    (try! (create-fusion-recipe "armor-accessory" "armor" "accessory" "Royal Battle Gear" "hybrid" "legendary"))
+    (try! (create-fusion-recipe "weapon-gem" "weapon" "gem" "Crystalline Blade" "enchanted-weapon" "epic"))
+    (ok true)
+  )
+)
+
+(define-read-only (get-fusion-recipe (recipe-name (string-ascii 64)))
+  (map-get? fusion-recipes recipe-name)
+)
+
+(define-read-only (is-asset-used-in-fusion (token-id uint))
+  (default-to false (map-get? asset-fusion-history token-id))
+)
+
+(define-read-only (can-fuse-assets (token-id-1 uint) (token-id-2 uint) (recipe-name (string-ascii 64)))
+  (let (
+    (metadata-1-opt (map-get? asset-metadata token-id-1))
+    (metadata-2-opt (map-get? asset-metadata token-id-2))
+    (recipe-opt (map-get? fusion-recipes recipe-name))
+  )
+    (match metadata-1-opt metadata-1
+      (match metadata-2-opt metadata-2
+        (match recipe-opt recipe
+          {
+            valid: (and
+              (get active recipe)
+              (not (is-eq token-id-1 token-id-2))
+              (is-none (map-get? asset-fusion-history token-id-1))
+              (is-none (map-get? asset-fusion-history token-id-2))
+              (or
+                (and 
+                  (is-eq (get asset-type metadata-1) (get input-type-1 recipe))
+                  (is-eq (get asset-type metadata-2) (get input-type-2 recipe)))
+                (and 
+                  (is-eq (get asset-type metadata-1) (get input-type-2 recipe))
+                  (is-eq (get asset-type metadata-2) (get input-type-1 recipe))))),
+            recipe-active: (get active recipe),
+            types-match: (or
+              (and 
+                (is-eq (get asset-type metadata-1) (get input-type-1 recipe))
+                (is-eq (get asset-type metadata-2) (get input-type-2 recipe)))
+              (and 
+                (is-eq (get asset-type metadata-1) (get input-type-2 recipe))
+                (is-eq (get asset-type metadata-2) (get input-type-1 recipe))))
+          }
+          {valid: false, recipe-active: false, types-match: false})
+        {valid: false, recipe-active: false, types-match: false})
+      {valid: false, recipe-active: false, types-match: false})
+  )
 )
