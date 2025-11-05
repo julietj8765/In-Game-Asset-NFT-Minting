@@ -1,5 +1,20 @@
 (define-non-fungible-token game-asset uint)
 
+(define-map operator-approvals { owner: principal, operator: principal } bool)
+
+(define-read-only (is-approved-operator (owner principal) (operator principal))
+  (default-to false (map-get? operator-approvals { owner: owner, operator: operator }))
+)
+
+(define-public (set-operator-approval (operator principal) (approved bool))
+  (begin
+    (map-set operator-approvals { owner: tx-sender, operator: operator } approved)
+    (ok approved)
+  )
+)
+
+ 
+
 (define-constant contract-owner tx-sender)
 (define-constant err-owner-only (err u100))
 (define-constant err-not-token-owner (err u101))
@@ -195,8 +210,12 @@
 )
 
 (define-public (transfer (token-id uint) (sender principal) (recipient principal))
-  (begin
-    (asserts! (or (is-eq tx-sender sender) (is-eq tx-sender (unwrap! (nft-get-owner? game-asset token-id) err-asset-not-found))) err-not-token-owner)
+  (let (
+    (owner (unwrap! (nft-get-owner? game-asset token-id) err-asset-not-found))
+    (approved (default-to false (map-get? operator-approvals { owner: owner, operator: tx-sender })))
+  )
+    (asserts! (is-eq sender owner) err-not-token-owner)
+    (asserts! (or (is-eq tx-sender owner) approved) err-not-token-owner)
     (nft-transfer? game-asset token-id sender recipient)
   )
 )
