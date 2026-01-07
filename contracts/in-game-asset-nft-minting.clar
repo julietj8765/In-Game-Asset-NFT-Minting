@@ -13,6 +13,38 @@
   )
 )
 
+(define-data-var royalty-recipient principal contract-owner)
+(define-data-var royalty-fee-bps uint u500)
+
+(define-read-only (get-royalty-config)
+  {
+    recipient: (var-get royalty-recipient),
+    fee-bps: (var-get royalty-fee-bps)
+  }
+)
+
+(define-public (set-royalty-config (recipient principal) (fee-bps uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (<= fee-bps u10000) err-insufficient-payment)
+    (var-set royalty-recipient recipient)
+    (var-set royalty-fee-bps fee-bps)
+    (ok {recipient: (var-get royalty-recipient), fee-bps: (var-get royalty-fee-bps)})
+  )
+)
+
+(define-read-only (royalty-info (token-id uint) (sale-price uint))
+  (let (
+    (recipient (var-get royalty-recipient))
+    (fee-bps (var-get royalty-fee-bps))
+    (amount (/ (* sale-price fee-bps) u10000))
+  )
+    {
+      recipient: recipient,
+      amount: amount
+    }
+  )
+)
  
 
 (define-constant contract-owner tx-sender)
