@@ -553,3 +553,107 @@
       {valid: false, recipe-active: false, types-match: false})
   )
 )
+
+;; Rental System Constants
+(define-constant err-invalid-duration (err u200))
+(define-constant err-rental-not-found (err u201))
+(define-constant err-rental-not-expired (err u202))
+
+;; Rental Maps
+(define-map rental-listings
+  uint
+  {
+    lender: principal,
+    price-per-block: uint,
+    min-duration: uint,
+    max-duration: uint
+  }
+)
+
+(define-map active-rentals
+  uint
+  {
+    renter: principal,
+    lender: principal,
+    start-block: uint,
+    end-block: uint
+  }
+)
+
+;; Rental Functions
+
+(define-public (list-asset-for-rent (token-id uint) (price-per-block uint) (min-duration uint) (max-duration uint))
+  (let ((owner (unwrap! (nft-get-owner? game-asset token-id) err-asset-not-found)))
+    (asserts! (is-eq tx-sender owner) err-not-token-owner)
+    (asserts! (is-none (map-get? marketplace-listings token-id)) err-asset-already-listed)
+    (asserts! (is-none (map-get? rental-listings token-id)) err-asset-already-listed)
+    (asserts! (< min-duration max-duration) err-invalid-duration)
+    
+    (try! (nft-transfer? game-asset token-id tx-sender (as-contract tx-sender)))
+    (map-set rental-listings token-id
+      {
+        lender: tx-sender,
+        price-per-block: price-per-block,
+        min-duration: min-duration,
+        max-duration: max-duration
+      })
+    (ok token-id)
+  )
+)
+
+(define-public (rent-asset (token-id uint) (duration uint))
+  (let (
+    (listing (unwrap! (map-get? rental-listings token-id) err-asset-not-listed))
+    (total-cost (* (get price-per-block listing) duration))
+  )
+    (asserts! (>= duration (get min-duration listing)) err-invalid-duration)
+    (asserts! (<= duration (get max-duration listing)) err-invalid-duration)
+    
+    (try! (stx-transfer? total-cost tx-sender (get lender listing)))
+    
+    (map-delete rental-listings token-id)
+    (map-set active-rentals token-id
+      {
+        renter: tx-sender,
+        lender: (get lender listing),
+        start-block: stacks-block-height,
+        end-block: (+ stacks-block-height duration)
+      })
+    (ok token-id)
+  )
+)
+
+(define-public (conclude-rental (token-id uint))
+  (let ((rental (unwrap! (map-get? active-rentals token-id) err-rental-not-found)))
+    (asserts! (>= stacks-block-height (get end-block rental)) err-rental-not-expired)
+    
+    (try! (as-contract (nft-transfer? game-asset token-id tx-sender (get lender rental))))
+    (map-delete active-rentals token-id)
+    (ok token-id)
+  )
+)
+
+(define-public (cancel-rental-listing (token-id uint))
+  (let ((listing (unwrap! (map-get? rental-listings token-id) err-asset-not-listed)))
+    (asserts! (is-eq tx-sender (get lender listing)) err-not-listed-owner)
+    
+    (try! (as-contract (nft-transfer? game-asset token-id tx-sender (get lender listing))))
+    (map-delete rental-listings token-id)
+    (ok token-id)
+  )
+)
+
+(define-read-only (get-rental-listing (token-id uint))
+  (map-get? rental-listings token-id)
+)
+
+(define-read-only (get-active-rental (token-id uint))
+  (map-get? active-rentals token-id)
+)
+
+(define-read-only (get-rented-asset-user (token-id uint))
+  (match (map-get? active-rentals token-id)
+    rental (some (get renter rental))
+    none
+  )
+)
